@@ -279,6 +279,27 @@ def stop_guard():
     _guard_running = False
 
 
+# ============ Tunnel 断开控制 ==================
+
+_visited_airports = set()
+_DISCONNECT_AFTER = 5
+
+
+def _disconnect_navigraph_tunnel(flow: http.HTTPFlow):
+    if flow.server_conn and flow.server_conn.connected:
+        flow.server_conn.error = Exception("强制断开 tunnel 连接")
+        log.info(f"[Tunnel] 已断开连接: api.navigraph.com")
+        global _visited_airports
+        _visited_airports = set()
+
+
+def _should_disconnect_tunnel(icao: str) -> bool:
+    global _visited_airports
+    _visited_airports.add(icao)
+    log.debug(f"[Tunnel] 已访问机场: {_visited_airports}, 计数: {len(_visited_airports)}")
+    return len(_visited_airports) >= _DISCONNECT_AFTER
+
+
 # ============ mitmproxy addon ==================
 
 
@@ -293,7 +314,7 @@ def load(loader):
 def request(flow: http.HTTPFlow):
 
     host = flow.request.pretty_host
-    
+
     log.debug(f"收到请求: {flow.request.method} {flow.request.url}")
     log.debug(f"Host: {host}")
     log.debug(f"Path: {flow.request.path}")
@@ -315,12 +336,12 @@ def request(flow: http.HTTPFlow):
             z = int(m.group(1))
             x = int(m.group(2))
             y = int(m.group(3))
-            
+
             log.info(f"解析瓦片坐标: z={z}, x={x}, y={y}")
 
             try:
                 tile = get_tile(x, y, z)
-                
+
                 if tile is not None:
                     success, data = cv2.imencode(
                         ".png",
@@ -425,6 +446,10 @@ def _handle_navigraph(flow: http.HTTPFlow):
             log.info(f"[航图] 【本地】 {full_url} -> {icao} {ap_name}")
         else:
             log.info(f"[航图] 【透传】 {full_url} (本地无此机场)")
+
+        if _should_disconnect_tunnel(icao):
+            _disconnect_navigraph_tunnel(flow)
+
         return
 
 

@@ -1,13 +1,13 @@
 ## Navi 替换
 
-通过 mitmproxy 拦截和替换部分信息，Navi 免费的账号也能用不需要额外订阅 Ultra。一个简单的数据示例放 release 供参考
+通过 mitmproxy 拦截和替换部分信息，Navi 免费的账号也能使用，不需要额外订阅 Ultra。一个简单的数据示例放 release 供参考
 
 ### OpenStreetMap
 
 地图的瓦片数据，请求很简单
 
 ```
-https://tile.openstreetmap.org/7/88/50.png
+https://tile.openstreetmap.org/8/203/105.png
 ```
 
 程序会替换处于国境线内的地图瓦片数据，虽然理论上用的是 Web Mercator，但在范围内用其他的比如正轴圆柱投影其实问题也不大

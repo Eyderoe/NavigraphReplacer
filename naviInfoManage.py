@@ -3,6 +3,7 @@ import os
 from functools import lru_cache
 from typing import List, Dict, Optional
 
+import cv2
 from PIL import ImageOps
 import numpy as np
 from pdf2image import convert_from_path
@@ -35,7 +36,7 @@ class NaviChart:
     def get_pic(self, night_mode: bool) -> Optional[np.ndarray]:
         if not os.path.exists(self.file_path):
             return None
-        image = convert_from_path(self.file_path, dpi=360, fmt='png')[0]
+        image = convert_from_path(self.file_path, dpi=360, fmt='png', use_pdftocairo=True)[0]
         image = np.asarray(image)[:, :, ::-1]
         if night_mode:
             image = (255 - image)[..., ::-1]
@@ -150,7 +151,6 @@ class NaviInfoManage:
             return None
         return {"charts": temp}
 
-    @lru_cache(maxsize=36)
     def get_pic(self, uni_id: str, night_mode: bool) -> Optional[np.ndarray]:
         """
         3. 获取某个图表 (.../v2/charts/YBOK/ybok103_d.png)
