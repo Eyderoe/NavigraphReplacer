@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+import os
+import subprocess
+
 ################################################################################
 ## Form generated from reading UI file 'toliss_efb.ui'
 ##
@@ -17,7 +20,8 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QRadioButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget, QPushButton, QFileDialog,
+    QMessageBox)
 
 # lineEdit 与 QSettings key 的映射
 _LINE_EDIT_KEYS = {
@@ -323,6 +327,7 @@ class Ui_toliss_efb(object):
 
 from tileProcess import init_tile_process
 import osmService
+from xplaneLaunch import launch_xplane
 
 
 class ToLissEFB(QWidget):
@@ -330,6 +335,18 @@ class ToLissEFB(QWidget):
         super().__init__()
         self.ui = Ui_toliss_efb()
         self.ui.setupUi(self)
+        self.ui.label.setWordWrap(True)
+
+        self.proxy_hint = QLabel(
+            f"航图拦截端口：127.0.0.1:{osmService.MITMPROXY_PORT}（程序内部端口）\n"
+            "上方 Clash HTTP 是上游端口。Falcon 8X 请先开启服务，再从此处启动 X-Plane。",
+            self
+        )
+        self.proxy_hint.setWordWrap(True)
+        self.ui.verticalLayout.addWidget(self.proxy_hint)
+        self.launch_button = QPushButton("启动 X-Plane（使用航图代理）", self)
+        self.launch_button.clicked.connect(self._launch_xplane)
+        self.ui.verticalLayout.addWidget(self.launch_button)
 
         self.ui.load_settings()
         self.ui.radioButton.setChecked(False)
@@ -388,4 +405,29 @@ class ToLissEFB(QWidget):
 
     def _stop_proxy(self):
         osmService.stop_service()
+
+    def _launch_xplane(self):
+        if not self.ui.radioButton.isChecked():
+            QMessageBox.information(self, "航图代理", "请先勾选“开启”，再启动 X-Plane。")
+            return
+        settings = QSettings()
+        executable = settings.value("XPlane/executable", "")
+        if not executable or not os.path.isfile(executable):
+            executable, _ = QFileDialog.getOpenFileName(
+                self, "选择 X-Plane.exe", executable, "X-Plane (X-Plane.exe)"
+            )
+            if not executable:
+                return
+        try:
+            process = launch_xplane(executable, osmService.MITMPROXY_PORT)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            QMessageBox.warning(self, "启动失败", str(exc))
+            return
+        settings.setValue("XPlane/executable", executable)
+        osmService.log.info("[启动 X-Plane] PID=%s 代理=http://127.0.0.1:%s",
+                            process.pid, osmService.MITMPROXY_PORT)
+
+    def closeEvent(self, event):
+        self._stop_proxy()
+        super().closeEvent(event)
 

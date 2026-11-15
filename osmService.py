@@ -37,20 +37,18 @@ LOG_FILE = os.path.join(
 
 # =============== 日志 ====================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.FileHandler(
-            LOG_FILE,
-            encoding="utf-8"
-        ),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-log = logging.getLogger(__name__)
+# mitmdump 已配置 root logger 时，basicConfig 不会生效。为插件单独配置日志。
+log = logging.getLogger("toliss_efb.osm")
+log.setLevel(logging.INFO)
+log.propagate = False
+if not log.handlers:
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+    )
+    for handler in (logging.FileHandler(LOG_FILE, encoding="utf-8"),
+                    logging.StreamHandler(sys.stdout)):
+        handler.setFormatter(formatter)
+        log.addHandler(handler)
 
 
 # =========== 保存原始代理 ================
@@ -309,15 +307,54 @@ def load(loader):
         log.info(f"上游代理:{UPSTREAM_PROXY}")
     else:
         log.info("未配置上游代理，直接连接")
+    log.info("[捕获] 插件已加载，日志=%s", LOG_FILE)
+
+
+def _is_navigraph_host(host):
+    host = host.lower().rstrip(".")
+    return host == "navigraph.com" or host.endswith(".navigraph.com")
+
+
+def _safe_request_url(flow):
+    # 不记录查询参数、Authorization 或响应正文。
+    return "{}://{}{}".format(
+        flow.request.scheme, flow.request.pretty_host,
+        flow.request.path.split("?", 1)[0]
+    )
+
+
+def http_connect(flow: http.HTTPFlow):
+    log.info("[捕获 CONNECT] %s:%s", flow.request.host, flow.request.port)
+
+
+def tls_failed_client(data):
+    log.warning("[捕获 TLS失败] 客户端=%s 目标=%s；检查客户端是否信任 mitmproxy CA",
+                data.conn.peername, data.context.server.address)
+
+
+def tls_failed_server(data):
+    log.warning("[捕获 TLS失败] 上游目标=%s", data.context.server.address)
+
+
+def response(flow: http.HTTPFlow):
+    if _is_navigraph_host(flow.request.pretty_host):
+        log.info("[捕获响应] %s status=%s 来源=%s bytes=%s",
+                 _safe_request_url(flow), flow.response.status_code,
+                 "本地" if flow.metadata.get("navigraph_local") else "上游",
+                 len(flow.response.raw_content or b""))
+
+
+def error(flow: http.HTTPFlow):
+    log.warning("[捕获请求失败] %s；检查上游代理和 TLS 连接", _safe_request_url(flow))
 
 
 def request(flow: http.HTTPFlow):
 
     host = flow.request.pretty_host
-
-    log.debug(f"收到请求: {flow.request.method} {flow.request.url}")
+    
+    log.debug(f"收到请求: {flow.request.method} {_safe_request_url(flow)}")
     log.debug(f"Host: {host}")
-    log.debug(f"Path: {flow.request.path}")
+    log.debug(f"Path: {flow.request.path.split('?', 1)[0]}")
 
 
     if (
@@ -336,12 +373,12 @@ def request(flow: http.HTTPFlow):
             z = int(m.group(1))
             x = int(m.group(2))
             y = int(m.group(3))
-
+            
             log.info(f"解析瓦片坐标: z={z}, x={x}, y={y}")
 
             try:
                 tile = get_tile(x, y, z)
-
+                
                 if tile is not None:
                     success, data = cv2.imencode(
                         ".png",
@@ -378,16 +415,19 @@ def request(flow: http.HTTPFlow):
         )
 
 
-    if "api.navigraph.com" in host:
+    if _is_navigraph_host(host):
+        log.info("[捕获请求] %s %s", flow.request.method, _safe_request_url(flow))
+    if host.lower().rstrip(".") == "api.navigraph.com":
         _handle_navigraph(flow)
 
 
 def _handle_navigraph(flow: http.HTTPFlow):
     """拦截 Navigraph API 请求，优先返回本地数据"""
     if _navi_mgr is None:
+        log.info("[航图] 未初始化本地航图，透传 %s", _safe_request_url(flow))
         return
 
-    full_url = flow.request.pretty_url
+    full_url = _safe_request_url(flow)
     path = flow.request.path.split("?")[0]
 
     # /v2/charts/{ICAO}/{id}_d.png 或 {id}_n.png
@@ -404,6 +444,7 @@ def _handle_navigraph(flow: http.HTTPFlow):
                     data.tobytes(),
                     {"Content-Type": "image/png"}
                 )
+                flow.metadata["navigraph_local"] = True
                 log.info(f"[航图] 【本地】 {full_url} -> 图片 {pic.shape[1]}x{pic.shape[0]}, {len(data)}bytes")
             else:
                 log.info(f"[航图] 【透传】 {full_url} (cv2编码失败)")
@@ -424,6 +465,7 @@ def _handle_navigraph(flow: http.HTTPFlow):
                 body,
                 {"Content-Type": "application/json"}
             )
+            flow.metadata["navigraph_local"] = True
             log.info(f"[航图] 【本地】 {full_url} -> {len(charts.get('charts', []))} 个图表")
         else:
             log.info(f"[航图] 【透传】 {full_url} (本地无此机场)")
@@ -442,15 +484,18 @@ def _handle_navigraph(flow: http.HTTPFlow):
                 body,
                 {"Content-Type": "application/json"}
             )
+            flow.metadata["navigraph_local"] = True
             ap_name = info.get("airport_name", icao)
             log.info(f"[航图] 【本地】 {full_url} -> {icao} {ap_name}")
         else:
             log.info(f"[航图] 【透传】 {full_url} (本地无此机场)")
-
+        
         if _should_disconnect_tunnel(icao):
             _disconnect_navigraph_tunnel(flow)
-
+        
         return
+
+    log.info("[航图] 未匹配本地替换规则，透传 %s", full_url)
 
 
 def done():
@@ -557,6 +602,7 @@ def _run_mitmproxy():
     
     cmd = [
         _find_mitmdump(),
+        "--listen-host", "127.0.0.1",
         "--listen-port", str(MITMPROXY_PORT),
         "-s", script_path,
         "--set", "ssl_insecure=true",
@@ -619,6 +665,9 @@ def start_service():
     log.info(
         "OSM 在线拦截已启动"
     )
+    log.info("[代理链路] X-Plane -> 127.0.0.1:%s -> %s", MITMPROXY_PORT,
+             UPSTREAM_PROXY or "直接联网")
+    log.info("[启动提示] Falcon/SASL 使用 libcurl，单改系统代理可能无效；请使用界面的启动 X-Plane 按钮")
     log.info(
         f"日志文件:{LOG_FILE}"
     )
