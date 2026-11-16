@@ -1,5 +1,7 @@
 import json
 import os
+import math
+from copy import deepcopy
 from functools import lru_cache
 from typing import List, Dict, Optional
 
@@ -7,6 +9,49 @@ import cv2
 from PIL import ImageOps
 import numpy as np
 from pdf2image import convert_from_path
+
+
+def prepare_north_up(info):
+    """从原图像素到经纬度的矩阵构造北朝上画布，并同步响应元数据。
+
+    返回 (原图到输出图的 2x3 矩阵, 输出尺寸, 原图尺寸)。记录中的坐标
+    始终属于原图；客户端收到的 width/height/bbox 则属于校正后的图片。
+    """
+    record = info.get("sp_chart_rotate_information_record")
+    if record is None:
+        return None
+    # 固定约定：原图左上为原点、x 向右、y 向下；输出经度/纬度，单位度。
+    width, height = float(info["width"]), float(info["height"])
+    matrix = np.asarray(record["pixel_to_geo_matrix"], dtype=float)
+    if (matrix.shape != (2, 3) or not np.isfinite(matrix).all()
+            or not all(math.isfinite(v) and v > 0 for v in (width, height))):
+        raise ValueError("Invalid chart affine matrix or dimensions")
+    corners = np.array([[0, 0, 1], [width, 0, 1],
+                        [width, height, 1], [0, height, 1]]) @ matrix.T
+    west, south = corners.min(axis=0)
+    east, north = corners.max(axis=0)
+    if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+        raise ValueError("Invalid chart geographic extent")
+    cos_latitude = math.cos(math.radians((south + north) / 2))
+    # 用原图每像素的平均地面面积确定分辨率，避免旋转后裁剪图纸。
+    step = math.sqrt(abs(float(np.linalg.det(matrix[:, :2]))) * cos_latitude)
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError("Singular chart affine matrix")
+    out_width = max(1, math.ceil((east - west) * cos_latitude / step))
+    out_height = max(1, math.ceil((north - south) / step))
+    geo_to_output = np.array([[out_width / (east - west), 0, -west * out_width / (east - west)],
+                              [0, -out_height / (north - south), north * out_height / (north - south)]])
+    affine = geo_to_output @ np.vstack([matrix, [0, 0, 1]])
+    boxes = deepcopy(info["bounding_boxes"])
+    boxes["planview"] = {
+        "pixels": {"x1": 0, "y1": out_height, "x2": out_width, "y2": 0},
+        "latlng": {"lng1": float(west), "lat1": float(south),
+                   "lng2": float(east), "lat2": float(north)},
+    }
+    # 旧 inset 像素框不能直接用于经过仿射校正的图片。
+    boxes["insets"] = []
+    info.update(width=out_width, height=out_height, bounding_boxes=boxes)
+    return affine, (out_width, out_height), (width, height)
 
 
 def walking(fold: str, file_list: List[str]):
@@ -32,12 +77,21 @@ class NaviChart:
     def __init__(self):
         self.info = dict()
         self.file_path = ''
+        self.north_up = None
 
     def get_pic(self, night_mode: bool) -> Optional[np.ndarray]:
         if not os.path.exists(self.file_path):
             return None
         image = convert_from_path(self.file_path, dpi=360, fmt='png', use_pdftocairo=True)[0]
         image = np.asarray(image)[:, :, ::-1]
+        if self.north_up is not None:
+            affine, output_size, source_size = self.north_up
+            affine = affine.copy()
+            # PDF 光栅化取整可能与 .Tnavi 记载的原图尺寸略有差异。
+            affine[:, 0] *= source_size[0] / image.shape[1]
+            affine[:, 1] *= source_size[1] / image.shape[0]
+            image = cv2.warpAffine(image, affine, output_size, flags=cv2.INTER_LINEAR,
+                                   borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
         if night_mode:
             image = (255 - image)[..., ::-1]
         return image
@@ -50,6 +104,7 @@ class NaviAirportInfo:
 
         icao = self.info["icao_airport_identifier"]
         for iChart in data[1:]:
+            iChart = deepcopy(iChart)
             # 补充信息
             iChart["image_day"] = "{}_d.png".format(iChart["id"])
             iChart["image_night"] = "{}_n.png".format(iChart["id"])
@@ -68,6 +123,7 @@ class NaviAirportInfo:
             temp = NaviChart()
             temp.info = iChart
             temp.file_path = file_path[0]
+            temp.north_up = prepare_north_up(temp.info)
             self.charts[iChart["id"]] = temp
 
     def get_ap_info(self) -> dict:

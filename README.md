@@ -1,6 +1,13 @@
-## Navi 替换
+## Navigraph 替换
 
 通过 mitmproxy 拦截和替换部分信息，Navi 免费的账号也能使用，不需要额外订阅 Ultra。一个简单的数据示例放 release 供参考
+
+### 已进行测试
+
+假如账号已有付费订阅，一般没问题。这里只针对免费账号的测试
+
+- ToLiss EFB：最新版本需要有效 Navi 订阅，还没解决
+- Falcon8X ND：没问题，但需要但命令行的启动 XPlane
 
 ### OpenStreetMap
 
@@ -27,3 +34,18 @@ https://api.navigraph.com/v2/charts/ZUCK/zuck51_d.png
 3. 航图本身，程序是按 dpi360 进行的渲染
 
 具体参数设置可以在 Navi 的[开发网站](https://developers.navigraph.com/docs/charts/airport-charts)找到
+
+对于国内机场图不太喜欢真北朝上的习惯，可以通过新增字段的方式（6元素），以正确形式返回请求
+
+```json
+"sp_chart_rotate_information_record": {
+  "pixel_to_geo_matrix": [
+    [a, b, c],
+    [d, e, f]
+  ]
+}
+
+经度 = ax + by + c
+纬度 = dx + ey + f
+```
+
