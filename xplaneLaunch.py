@@ -7,7 +7,12 @@ import os
 from pathlib import Path
 import re
 import socket
+import ssl
 import subprocess
+import json
+from http.client import HTTPConnection
+
+from hostsService import DOMAINS
 
 
 def prepare_steam_launch(executable):
@@ -54,7 +59,7 @@ def proxy_environment(port, environ=None):
     return env
 
 
-def launch_xplane(executable, port):
+def _check_executable(executable):
     executable = Path(executable).resolve()
     if not executable.is_file():
         raise ValueError("找不到 X-Plane.exe：{}".format(executable))
@@ -66,18 +71,62 @@ def launch_xplane(executable, port):
     if any(row and row[0].lower() == "x-plane.exe"
            for row in csv.reader(io.StringIO(result.stdout))):
         raise ValueError("请先退出已经运行的 X-Plane，再通过此按钮启动。已有进程无法继承新的代理环境变量。")
-    try:
-        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
-            pass
-    except OSError as exc:
-        raise ValueError("航图代理尚未监听端口 {}，请先开启服务，稍等后重试。".format(port)) from exc
+    return executable
+
+
+def _spawn_xplane(executable, env):
     app_id = prepare_steam_launch(executable)
-    env = proxy_environment(port)
     if app_id:
         for key in list(env):
             if key.lower() in ("steamappid", "steamgameid"):
                 del env[key]
         env.update(SteamAppId=app_id, SteamGameId=app_id)
-    return subprocess.Popen(
-        [str(executable)], cwd=str(executable.parent), env=env
-    )
+    return subprocess.Popen([str(executable)], cwd=str(executable.parent), env=env)
+
+
+def launch_xplane(executable, port):
+    executable = _check_executable(executable)
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
+            pass
+    except OSError as exc:
+        raise ValueError("航图代理尚未监听端口 {}，请先开启服务，稍等后重试。".format(port)) from exc
+    env = proxy_environment(port)
+    return _spawn_xplane(executable, env)
+
+
+def hosts_environment(environ=None):
+    source = os.environ if environ is None else environ
+    proxy_keys = {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    env = {key: value for key, value in source.items() if key.lower() not in proxy_keys}
+    env["no_proxy"] = ",".join(("127.0.0.1", "localhost", "::1", *DOMAINS))
+    return env
+
+
+def verify_local_origin(ca_path, port=443):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    connection = HTTPConnection("identity.api.navigraph.com", timeout=3)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=3)
+    try:
+        connection.sock = context.wrap_socket(raw, server_hostname="identity.api.navigraph.com")
+        raw = None  # owned by connection from this point on
+        connection.request("GET", "/connect/userinfo", headers={
+            "Host": "identity.api.navigraph.com", "User-Agent": "ToLissEFB-Launcher/1"})
+        response = connection.getresponse()
+        body = json.loads(response.read(65536))
+        if response.status != 200 or body.get("sub") != "toliss-efb-local":
+            raise ValueError("本地 HTTPS 未返回 Local Charts 身份，请重启航图服务。")
+    finally:
+        connection.close()
+        if raw is not None:
+            raw.close()
+
+
+def launch_xplane_hosts(executable, ca_path):
+    executable = _check_executable(executable)
+    verify_local_origin(ca_path)
+    env = hosts_environment()
+    process = _spawn_xplane(executable, env)
+    logging.getLogger("toliss_efb.osm").info(
+        "[hosts 启动 X-Plane] PID=%s；已验证本地 HTTPS，子进程不继承代理环境变量", process.pid)
+    return process

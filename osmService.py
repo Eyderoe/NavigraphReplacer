@@ -45,8 +45,10 @@ if not log.handlers:
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
     )
-    for handler in (logging.FileHandler(LOG_FILE, encoding="utf-8"),
-                    logging.StreamHandler(sys.stdout)):
+    handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
+    for handler in handlers:
         handler.setFormatter(formatter)
         log.addHandler(handler)
 
@@ -547,13 +549,11 @@ def configure_navi(chart_folder: str = None, load_folder: str = None):
 
 
 def _find_mitmdump():
-    mitmdump_path = os.path.join(
-        os.path.dirname(sys.executable),
-        "Scripts",
-        "mitmdump.exe"
-    )
-    if os.path.exists(mitmdump_path):
-        return mitmdump_path
+    executable_dir = os.path.dirname(sys.executable)
+    for mitmdump_path in (os.path.join(executable_dir, "mitmdump.exe"),
+                          os.path.join(executable_dir, "Scripts", "mitmdump.exe")):
+        if os.path.isfile(mitmdump_path):
+            return mitmdump_path
     return "mitmdump"
 
 
@@ -618,7 +618,8 @@ def _run_mitmproxy():
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=env
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         
         t = threading.Thread(target=_read_subprocess_output, args=(_mitmproxy_process,), daemon=True)
