@@ -1,6 +1,7 @@
 import json
 import os
 import math
+import subprocess
 from copy import deepcopy
 from functools import lru_cache
 from typing import List, Dict, Optional
@@ -9,6 +10,19 @@ import cv2
 from PIL import ImageOps
 import numpy as np
 from pdf2image import convert_from_path
+import pdf2image.pdf2image as _pdf2image
+
+
+def _hidden_poppler_popen(*args, **kwargs):
+    """Hide every Poppler subprocess, including pdfinfo and version probes."""
+    kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+    return subprocess.Popen(*args, **kwargs)
+
+
+if os.name == "nt":
+    # pdf2image 1.17 hides rendering only; its metadata/version probes still flash
+    # a console when launched by pythonw. Limit this override to pdf2image.
+    _pdf2image.Popen = _hidden_poppler_popen
 
 
 def prepare_north_up(info):
